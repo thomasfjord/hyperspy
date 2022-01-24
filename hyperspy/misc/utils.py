@@ -28,7 +28,7 @@ import unicodedata
 from contextlib import contextmanager
 import importlib
 import logging
-from distutils.version import LooseVersion
+from packaging.version import Version
 
 import numpy as np
 
@@ -1156,8 +1156,8 @@ def transpose(*args, signal_axes=None, navigation_axes=None, optimize=False):
 def process_function_blockwise(data,
                                *args,
                                function,
-                               nav_indexes=None,
-                               output_signal_size=None,
+                               nav_indexes,
+                               output_signal_size,
                                block_info=None,
                                arg_keys=None,
                                **kwargs):
@@ -1194,7 +1194,8 @@ def process_function_blockwise(data,
     chunk_nav_shape = tuple([data.shape[i] for i in sorted(nav_indexes)])
     output_shape = chunk_nav_shape + tuple(output_signal_size)
     # Pre-allocating the output array
-    output_array = np.empty(output_shape, dtype=dtype)
+    kw = get_numpy_kwargs(data)
+    output_array = np.empty(output_shape, dtype=dtype, **kw)
     if len(args) == 0:
         # There aren't any BaseSignals for iterating
         for nav_index in np.ndindex(chunk_nav_shape):
@@ -1456,7 +1457,7 @@ def get_numpy_kwargs(array):
 
     """
     kw = {}
-    if LooseVersion(np.__version__) >= LooseVersion("1.20"):
+    if Version(np.__version__) >= Version("1.20"):
          kw['like'] = array
 
     return kw

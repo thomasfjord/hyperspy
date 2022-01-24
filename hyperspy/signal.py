@@ -42,21 +42,29 @@ from hyperspy.api_nogui import _ureg
 from hyperspy.drawing import mpl_hie, mpl_hse, mpl_he
 from hyperspy.learn.mva import MVA, LearningResults
 from hyperspy.io import assign_signal_subclass
-import hyperspy.misc.utils
-from hyperspy.misc.utils import DictionaryTreeBrowser
 from hyperspy.drawing import signal as sigdraw
 from hyperspy.misc.io.tools import ensure_directory
-from hyperspy.misc.utils import iterable_not_string
 from hyperspy.exceptions import SignalDimensionError, DataDimensionError
 from hyperspy.misc import rgb_tools
-from hyperspy.misc.utils import underline, isiterable, slugify, to_numpy
+from hyperspy.misc.utils import (
+    add_scalar_axis,
+    DictionaryTreeBrowser,
+    get_array_module,
+    guess_output_signal_size,
+    is_binned, # remove in v2.0
+    is_cupy_array,
+    isiterable,
+    iterable_not_string,
+    process_function_blockwise,
+    rollelem,
+    slugify,
+    to_numpy,
+    underline,
+    )
 from hyperspy.misc.hist_tools import histogram
 from hyperspy.drawing.utils import animate_legend
 from hyperspy.drawing.marker import markers_metadata_dict_to_markers
 from hyperspy.misc.slicing import SpecialSlicers, FancySlicing
-from hyperspy.misc.utils import is_binned # remove in v2.0
-from hyperspy.misc.utils import process_function_blockwise, guess_output_signal_size
-from hyperspy.misc.utils import add_scalar_axis
 from hyperspy.docstrings.signal import (
     ONE_AXIS_PARAMETER, MANY_AXIS_PARAMETER, OUT_ARG, NAN_FUNC, OPTIMIZE_ARG,
     RECHUNK_ARG, SHOW_PROGRESSBAR_ARG, PARALLEL_ARG, MAX_WORKERS_ARG,
@@ -3090,13 +3098,13 @@ class BaseSignal(FancySlicing,
         to_index = self.axes_manager[to_axis].index_in_array
         if axis == to_index:
             return self.deepcopy()
-        new_axes_indices = hyperspy.misc.utils.rollelem(
+        new_axes_indices = rollelem(
             [axis_.index_in_array for axis_ in self.axes_manager._axes],
             index=axis,
             to_index=to_index)
 
         s = self._deepcopy_with_new_data(self.data.transpose(new_axes_indices))
-        s.axes_manager._axes = hyperspy.misc.utils.rollelem(
+        s.axes_manager._axes = rollelem(
             s.axes_manager._axes,
             index=axis,
             to_index=to_index)
@@ -4862,8 +4870,10 @@ class BaseSignal(FancySlicing,
     map.__doc__ %= (SHOW_PROGRESSBAR_ARG, PARALLEL_ARG, LAZY_OUTPUT_ARG, MAX_WORKERS_ARG)
 
     def _map_all(self, function, inplace=True, **kwargs):
-        """The function has to have either 'axis' or 'axes' keyword argument,
-        and hence support operating on the full dataset efficiently."""
+        """
+        The function has to have either 'axis' or 'axes' keyword argument,
+        and hence support operating on the full dataset efficiently.
+        """
         newdata = function(self.data, **kwargs)
         if inplace:
             self.data = newdata
@@ -4893,6 +4903,7 @@ class BaseSignal(FancySlicing,
     ):
         if lazy_output is None:
             lazy_output = self._lazy
+
         if not self._lazy:
             s_input = self.as_lazy()
         else:
@@ -4909,6 +4920,7 @@ class BaseSignal(FancySlicing,
         chunk_span = [
             chunk_span[i] for i in s_input.axes_manager.signal_indices_in_array
         ]
+
         if not all(chunk_span):
             _logger.info(
                 "The chunk size needs to span the full signal size, rechunking..."
@@ -4916,8 +4928,13 @@ class BaseSignal(FancySlicing,
             old_sig = s_input.rechunk(inplace=False, nav_chunks=None)
         else:
             old_sig = s_input
+
         os_am = old_sig.axes_manager
-        autodetermine = (output_signal_size is None or output_dtype is None) # try to guess output dtype and sig size?
+        # try to guess output dtype and sig size
+        autodetermine = (output_signal_size is None or output_dtype is None)
+        if autodetermine and is_cupy_array(self.data):
+            raise ValueError('Autodetermination of `output_signal_size` and '
+                             '`output_dtype` is not supported for cupy array.')
 
         args, arg_keys = old_sig._get_iterating_kwargs(iterating_kwargs)
 
@@ -4941,21 +4958,26 @@ class BaseSignal(FancySlicing,
 
         drop_axis, new_axis, axes_changed = self._get_drop_axis_new_axis(output_signal_size)
         chunks = tuple([old_sig.data.chunks[i] for i in sorted(nav_indexes)]) + output_signal_size
-        mapped = da.map_blocks(
+
+        mapped = old_sig.data.map_blocks(
+            # map_blocks arguments
             process_function_blockwise,
-            old_sig.data,
+            dtype=output_dtype,
+            chunks=chunks,
+            drop_axis=drop_axis,
+            new_axis=new_axis,
+            meta=get_array_module(old_sig).array((), dtype=output_dtype),
+            # process_function_blockwise arguments
             *args,
             function=function,
             nav_indexes=nav_indexes,
-            drop_axis=drop_axis,
-            new_axis=new_axis,
             output_signal_size=output_signal_size,
-            dtype=output_dtype,
-            chunks=chunks,
             arg_keys=arg_keys,
             **kwargs
         )
+
         data_stored = False
+
         if inplace:
             if (
                 not self._lazy
@@ -4976,12 +4998,13 @@ class BaseSignal(FancySlicing,
                 data_stored = True
             else:
                 self.data = mapped
-            self._lazy = lazy_output
             sig = self
         else:
             sig = s_input._deepcopy_with_new_data(mapped)
+
         am = sig.axes_manager
         sig._lazy = lazy_output
+
         if ragged:
             axes_dicts = self.axes_manager._get_navigation_axes_dicts()
             sig.axes_manager.__init__(axes_dicts)
@@ -4990,15 +5013,17 @@ class BaseSignal(FancySlicing,
             am.remove(am.signal_axes[len(output_signal_size) :])
             for ind in range(len(output_signal_size) - am.signal_dimension, 0, -1):
                 am._append_axis(size=output_signal_size[-ind], navigate=False)
+
         if not ragged:
             sig.axes_manager._ragged = False
             if output_signal_size == () and am.navigation_dimension == 0:
                 add_scalar_axis(sig)
             sig.get_dimensions_from_data()
         sig._assign_subclass()
-        if not lazy_output:
-            if not data_stored:
-                sig.data = sig.data.compute(num_workers=max_workers)
+
+        if not lazy_output and not data_stored:
+            sig.data = sig.data.compute(num_workers=max_workers)
+
         return sig
 
     def _get_drop_axis_new_axis(self, output_signal_size):

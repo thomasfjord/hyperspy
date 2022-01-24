@@ -17,9 +17,9 @@
 
 
 from collections import OrderedDict
-from distutils.version import LooseVersion
-import math as math
 import logging
+import math as math
+from packaging.version import Version
 
 import dask
 import dask.array as da
